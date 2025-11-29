@@ -1,0 +1,171 @@
+import discord
+from discord import app_commands
+from discord.ext import commands, tasks
+import json
+import os
+import time
+
+# -------------------------
+# KONFIGURACJA
+# -------------------------
+OWNER_ID = 123456789012345678  # <- wstaw swoje ID Discord
+CONFIG_FILE = "config.json"
+
+def load_config():
+    if not os.path.exists(CONFIG_FILE):
+        return {}
+    with open(CONFIG_FILE, "r") as f:
+        return json.load(f)
+
+def save_config(config):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(config, f, indent=4)
+
+config = load_config()
+config.setdefault("allowed_guilds", [])
+config.setdefault("log_channels", {})
+save_config(config)
+
+intents = discord.Intents.default()
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# -------------------------
+# FUNKCJA LOGÓW
+# -------------------------
+async def wyslij_log(guild_id, tresc):
+    gid = str(guild_id)
+    if gid not in config["log_channels"]:
+        return
+    kanal = bot.get_channel(config["log_channels"][gid])
+    if kanal:
+        try:
+            await kanal.send(tresc)
+        except:
+            pass
+
+# -------------------------
+# START BOTA
+# -------------------------
+@bot.event
+async def on_ready():
+    await bot.tree.sync()
+    print(f"Zalogowano jako {bot.user}")
+    auto_bump.start()
+
+# -------------------------
+# /ustawlog
+# -------------------------
+@bot.tree.command(name="ustawlog", description="Ustaw kanał do logów bota")
+async def ustawlog(interaction: discord.Interaction, kanal: discord.TextChannel):
+    guild_id = str(interaction.guild_id)
+    config["log_channels"][guild_id] = kanal.id
+    save_config(config)
+    await interaction.response.send_message(f"✔ Kanał logów ustawiony na: {kanal.mention}")
+    await wyslij_log(guild_id, f"🟩 Kanał logów ustawiony przez {interaction.user.mention}")
+
+# -------------------------
+# Auto-bump dodawanie/usuwanie serwerów
+# -------------------------
+@bot.tree.command(name="autobump_dodaj", description="Dodaj serwer do auto-bumpu (tylko właściciel)")
+async def autobump_dodaj(interaction: discord.Interaction, serwer_id: str):
+    if interaction.user.id != OWNER_ID:
+        return await interaction.response.send_message("❌ Brak uprawnień.")
+    try:
+        serwer_id = int(serwer_id)
+    except:
+        return await interaction.response.send_message("❌ Podaj poprawne ID.")
+    if serwer_id in config["allowed_guilds"]:
+        return await interaction.response.send_message("⚠ Ten serwer już jest na liście.")
+    config["allowed_guilds"].append(serwer_id)
+    save_config(config)
+    await interaction.response.send_message(f"✔ Dodano serwer **{serwer_id}** do auto-bumpu.")
+
+@bot.tree.command(name="autobump_usun", description="Usuń serwer z auto-bumpu (tylko właściciel)")
+async def autobump_usun(interaction: discord.Interaction, serwer_id: str):
+    if interaction.user.id != OWNER_ID:
+        return await interaction.response.send_message("❌ Brak uprawnień.")
+    try:
+        serwer_id = int(serwer_id)
+    except:
+        return await interaction.response.send_message("❌ Podaj poprawne ID.")
+    if serwer_id not in config["allowed_guilds"]:
+        return await interaction.response.send_message("⚠ Tego serwera nie ma na liście.")
+    config["allowed_guilds"].remove(serwer_id)
+    save_config(config)
+    await interaction.response.send_message(f"✔ Usunięto serwer **{serwer_id}** z auto-bumpu.")
+
+# -------------------------
+# /wspolpraca
+# -------------------------
+@bot.tree.command(name="wspolpraca", description="Ustaw kanał współpracy")
+async def wspolpraca(interaction: discord.Interaction, kanal: discord.TextChannel):
+    guild_id = str(interaction.guild_id)
+    config[guild_id] = config.get(guild_id, {})
+    config[guild_id]["wspolpraca"] = kanal.id
+    save_config(config)
+    await interaction.response.send_message(f"✔ Kanał współpracy ustawiony na {kanal.mention}")
+    await wyslij_log(guild_id, f"🟡 Kanał współpracy zmieniony przez {interaction.user.mention}")
+
+# -------------------------
+# /reklama
+# -------------------------
+@bot.tree.command(name="reklama", description="Ustaw kanał i wiadomość z reklamą")
+async def reklama(interaction: discord.Interaction, kanal: discord.TextChannel, wiadomosc_id: str):
+    guild_id = str(interaction.guild_id)
+    config[guild_id] = config.get(guild_id, {})
+    config[guild_id]["reklama_channel"] = kanal.id
+    config[guild_id]["reklama_message_id"] = wiadomosc_id
+    save_config(config)
+    await interaction.response.send_message(f"✔ Zapisano reklamę!")
+    await wyslij_log(guild_id, f"🟣 Reklama ustawiona przez {interaction.user.mention}")
+
+# -------------------------
+# Funkcja bumpowania
+# -------------------------
+async def do_bump(guild_id):
+    gid = str(guild_id)
+    if gid not in config or "wspolpraca" not in config[gid]:
+        return "❌ Nie ustawiono kanału współpracy."
+    if "reklama_channel" not in config[gid] or "reklama_message_id" not in config[gid]:
+        return "❌ Nie ustawiono reklamy."
+    try:
+        reklama_channel = bot.get_channel(config[gid]["reklama_channel"])
+        wspolpraca_channel = bot.get_channel(config[gid]["wspolpraca"])
+        msg = await reklama_channel.fetch_message(int(config[gid]["reklama_message_id"]))
+        await wspolpraca_channel.send(msg.content)
+        return "✔ Reklama wysłana!"
+    except Exception as e:
+        return f"❌ Błąd: {e}"
+
+# -------------------------
+# /bumpuj
+# -------------------------
+@bot.tree.command(name="bumpuj", description="Wyślij reklamę (cooldown 1h)")
+async def bumpuj(interaction: discord.Interaction):
+    guild_id = str(interaction.guild_id)
+    now = time.time()
+    last = config.get(guild_id, {}).get("last_bump", 0)
+    if now - last < 3600:
+        remaining = int((3600 - (now - last)) / 60)
+        return await interaction.response.send_message(f"❌ Poczekaj jeszcze **{remaining} min**.")
+    result = await do_bump(interaction.guild_id)
+    config[guild_id]["last_bump"] = now
+    save_config(config)
+    await wyslij_log(guild_id, f"🔵 Manualny bump wykonany przez {interaction.user.mention}")
+    await interaction.response.send_message(result)
+
+# -------------------------
+# Auto-bump co 2h
+# -------------------------
+@tasks.loop(hours=2)
+async def auto_bump():
+    for gid in config["allowed_guilds"]:
+        result = await do_bump(gid)
+        await wyslij_log(gid, f"🟢 Auto-bump wykonany\nWynik: `{result}`")
+        print(result)
+
+# -------------------------
+# Uruchomienie bota
+# -------------------------
+TOKEN = os.getenv("TOKEN")
+bot.run(TOKEN)
